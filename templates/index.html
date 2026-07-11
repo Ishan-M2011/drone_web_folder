@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Drone AI Stream</title>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <style>
+        body {
+            background-color: #121212;
+            color: white;
+            font-family: Arial, sans-serif;
+            text-align: center;
+            margin-top: 50px;
+        }
+        #stream-box {
+            margin: 20px auto;
+            width: 640px;
+            height: 480px;
+            background-color: #000;
+            border: 3px solid #333;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        img {
+            width: 100%;
+            height: 100%;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Live Drone Mission Control</h1>
+    <p>Status: <span id="status" style="color: red;">Disconnected</span></p>
+    
+    <div id="stream-box">
+        <img id="live-feed" src="" alt="Waiting for Pi to broadcast..." />
+    </div>
+
+    <script>
+        const socket = io();
+        const statusEl = document.getElementById('status');
+        const imgEl = document.getElementById('live-feed');
+
+        socket.on('connect', () => {
+            statusEl.textContent = "Connected to Server";
+            statusEl.style.color = "green";
+        });
+
+        socket.on('disconnect', () => {
+            statusEl.textContent = "Disconnected";
+            statusEl.style.color = "red";
+        });
+
+        // Listen for raw frame data broadcasted by the server
+        socket.on('stream_display', (data) => {
+            imgEl.src = "data:image/jpeg;base64," + data.image;
+        });
+    </script>
+</body>
+</html>
