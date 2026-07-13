@@ -1,4 +1,75 @@
-<script>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Drone Mission Control</title>
+    <!-- Core AI Libraries -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tensorflow/4.20.0/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+    <!-- Stable Socket.IO Client CDN Delivery -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
+    <style>
+        body { 
+            background-color: #111; 
+            color: white; 
+            font-family: sans-serif; 
+            text-align: center; 
+            margin: 0; 
+            padding: 20px; 
+        }
+        #status { 
+            font-weight: bold; 
+            margin-bottom: 20px; 
+        }
+        .connected { color: #00ff00; }
+        .disconnected { color: #ff3333; }
+        .container { 
+            position: relative; 
+            width: 480px; 
+            height: 360px; 
+            margin: 0 auto; 
+            border: 2px solid #333; 
+            border-radius: 8px; 
+            overflow: hidden; 
+        }
+        #canvasOverlay { 
+            position: absolute; 
+            top: 0; 
+            left: 0; 
+            width: 100%; 
+            height: 100%; 
+            z-index: 10; 
+        }
+        #loadingOverlay { 
+            position: absolute; 
+            top: 50%; 
+            left: 50%; 
+            transform: translate(-50%, -50%); 
+            font-size: 18px; 
+            background: rgba(0,0,0,0.7); 
+            padding: 10px 20px; 
+            border-radius: 5px; 
+        }
+        #bufferStatus { 
+            margin-top: 10px; 
+            color: #aaa; 
+            font-size: 14px; 
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Live Drone Mission Control</h1>
+    <div id="status">Status: <span id="statusText" class="disconnected">Loading AI Model...</span></div>
+
+    <div class="container">
+        <canvas id="canvasOverlay" width="480" height="360"></canvas>
+        <div id="loadingOverlay">Initializing Object Detection AI...</div>
+    </div>
+    <div id="bufferStatus">Buffer Queue: 0 frames</div>
+
+    <script>
         const socket = io();
         const statusText = document.getElementById('statusText');
         const canvas = document.getElementById('canvasOverlay');
@@ -8,19 +79,21 @@
         
         let aiModel = null;
         const frameQueue = []; 
-        const BUFFER_DELAY_MS = 1000; 
+        const BUFFER_DELAY_MS = 1000; // 1 Second buffer delay window
 
         const offscreenImg = new Image();
         let isImgLoading = false;
 
-        // 1. Load the AI Model
+        // 1. Initialize the Object Detection Model
         cocoSsd.load().then(model => {
             aiModel = model;
             loadingOverlay.style.display = 'none';
             statusText.textContent = 'Waiting for Pi...';
             
-            // Background rendering loop
+            // Start background frame checking loop (~30 FPS)
             setInterval(processNextFrame, 33);
+        }).catch(err => {
+            console.error("Critical: Failed to load AI Model:", err);
         });
 
         socket.on('connect', () => {
@@ -33,7 +106,7 @@
             statusText.className = 'disconnected';
         });
 
-        // 2. Queue up incoming Base64 image frames
+        // 2. Safely capture incoming Base64 image strings
         socket.on('response_back', function(data) {
             if (data && data.image) {
                 frameQueue.push({
@@ -43,50 +116,61 @@
             }
         });
 
-        // 3. Process the Queue
+        // 3. Process and stream frame queues chronologically
         async function processNextFrame() {
             bufferStatus.textContent = `Buffer Queue: ${frameQueue.length} frames`;
 
+            // If the image worker is currently decoding a frame, hold on
             if (isImgLoading) return;
 
+            // Only pull frames that have aged past our 1-second cushion window
             if (frameQueue.length > 0 && (Date.now() - frameQueue[0].timestamp >= BUFFER_DELAY_MS)) {
                 const currentFrame = frameQueue.shift();
                 isImgLoading = true;
                 
                 offscreenImg.onload = async () => {
+                    // Wipe the previous frame and draw the new background image instantly
                     ctx.clearRect(0, 0, canvas.width, canvas.height);
                     ctx.drawImage(offscreenImg, 0, 0, canvas.width, canvas.height);
 
+                    // Overlay AI predictions seamlessly on top of the layout
                     if (aiModel) {
                         try {
                             const predictions = await aiModel.detect(canvas);
                             predictions.forEach(prediction => {
                                 const [x, y, width, height] = prediction.bbox;
+                                
+                                // Draw targeting boxes
                                 ctx.strokeStyle = '#00ff00';
                                 ctx.lineWidth = 3;
                                 ctx.strokeRect(x, y, width, height);
 
+                                // Draw label text background banner
                                 ctx.fillStyle = '#00ff00';
                                 const textWidth = ctx.measureText(prediction.class).width;
                                 ctx.fillRect(x, y - 21, textWidth + 30, 21);
 
+                                // Render bounding text string description
                                 ctx.fillStyle = '#000000';
                                 ctx.font = 'bold 14px sans-serif';
                                 ctx.fillText(`${prediction.class} (${Math.round(prediction.score * 100)}%)`, x + 5, y - 6);
                             });
                         } catch (aiErr) {
-                            console.error("AI execution error:", aiErr);
+                            console.error("AI runtime error processing frame:", aiErr);
                         }
                     }
-                    isImgLoading = false; 
+                    isImgLoading = false; // Clear lock
                 };
 
                 offscreenImg.onerror = () => {
-                    isImgLoading = false; 
+                    console.warn("Skipping bad payload or corrupted frame texture parsing.");
+                    isImgLoading = false; // Always clear lock even if parsing failed
                 };
 
-                // Read directly as a standard safe Data URL string
+                // Read payload strings as a safe Data URL resource direct format
                 offscreenImg.src = 'data:image/jpeg;base64,' + currentFrame.base64Data;
             }
         }
     </script>
+</body>
+</html>
