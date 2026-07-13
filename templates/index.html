@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Live Drone Mission Control</title>
+    <title>Live Drone Mission Control (Buffered AI)</title>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
@@ -13,9 +13,9 @@
         .connected { color: #00ff00; }
         .disconnected { color: #ff3333; }
         .container { position: relative; width: 480px; height: 360px; margin: 0 auto; border: 2px solid #333; border-radius: 8px; overflow: hidden; }
-        #streamView { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; display: none; }
         #canvasOverlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 10; }
         #loadingOverlay { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 18px; background: rgba(0,0,0,0.7); padding: 10px 20px; border-radius: 5px; }
+        #bufferStatus { margin-top: 10px; color: #aaa; font-size: 14px; }
     </style>
 </head>
 <body>
@@ -24,29 +24,36 @@
     <div id="status">Status: <span id="statusText" class="disconnected">Loading AI Model...</span></div>
 
     <div class="container">
-        <img id="streamView" src="" alt="Live feed">
+        <!-- We use an offscreen image element to parse data completely behind the scenes -->
+        <img id="offscreenAsset" style="display: none;">
         <canvas id="canvasOverlay" width="480" height="360"></canvas>
         <div id="loadingOverlay">Initializing Object Detection AI...</div>
     </div>
+    <div id="bufferStatus">Buffer Queue: 0 frames</div>
 
     <script>
         const socket = io();
         const statusText = document.getElementById('statusText');
-        const streamView = document.getElementById('streamView');
+        const offscreenAsset = document.getElementById('offscreenAsset');
         const canvas = document.getElementById('canvasOverlay');
         const ctx = canvas.getContext('2d');
         const loadingOverlay = document.getElementById('loadingOverlay');
+        const bufferStatus = document.getElementById('bufferStatus');
         
         let aiModel = null;
-        let currentPredictions = [];
+        
+        // This array acts as our 1-second video buffer pipeline
+        const frameQueue = []; 
+        const BUFFER_DELAY_MS = 1000; // 1 Second intentional delay
 
-        // 1. Load AI Model
+        // 1. Load the AI Model
         cocoSsd.load().then(model => {
             aiModel = model;
             loadingOverlay.style.display = 'none';
             statusText.textContent = 'Waiting for Pi...';
-            // Start the background AI processing loop
-            runAI();
+            
+            // Kick off the playback loop which processes and renders frames
+            processAndRenderLoop();
         });
 
         socket.on('connect', () => {
@@ -59,50 +66,71 @@
             statusText.className = 'disconnected';
         });
 
-        // 2. Handle incoming binary frames (Instantly renders, zero blocking)
+        // 2. Handle incoming binary packets from Render
         socket.on('response_back', function(data) {
-            const blob = new Blob([data.image], { type: 'image/jpeg' });
-            // Clean up old object URLs to prevent browser memory leaks
-            if (streamView.src) {
-                URL.revokeObjectURL(streamView.src);
-            }
-            streamView.src = URL.createObjectURL(blob);
+            // Push the frame data along with a timestamp of when it arrived
+            frameQueue.push({
+                binaryData: data.image,
+                timestamp: Date.now()
+            });
         });
 
-        // 3. Fast Video Render Loop (Runs at 60 FPS)
-        streamView.onload = function() {
-            // Draw the camera image onto the canvas instantly
-            ctx.drawImage(streamView, 0, 0, canvas.width, canvas.height);
+        // 3. The Core Processing Pipeline
+        async function processAndRenderLoop() {
+            bufferStatus.textContent = `Buffer Queue: ${frameQueue.length} frames`;
 
-            // Draw whatever the latest AI predictions are without waiting for new calculations
-            currentPredictions.forEach(prediction => {
-                const [x, y, width, height] = prediction.bbox;
-                ctx.strokeStyle = '#00ff00';
-                ctx.lineWidth = 3;
-                ctx.strokeRect(x, y, width, height);
+            // If we have frames, check if the oldest frame has sat in the queue for at least 1 second
+            if (frameQueue.length > 0 && (Date.now() - frameQueue[0].timestamp >= BUFFER_DELAY_MS)) {
+                
+                // Pull the oldest frame out from the front of the queue
+                const currentFrame = frameQueue.shift();
+                
+                // Convert binary data array into an active image element structure
+                const blob = new Blob([currentFrame.binaryData], { type: 'image/jpeg' });
+                const objectUrl = URL.createObjectURL(blob);
 
-                ctx.fillStyle = '#00ff00';
-                const textWidth = ctx.measureText(prediction.class).width;
-                ctx.fillRect(x, y - 21, textWidth + 30, 21);
+                // Wait for the browser memory asset to fully populate
+                await new Promise((resolve) => {
+                    offscreenAsset.onload = () => {
+                        URL.revokeObjectURL(objectUrl); // Clean up memory leaks immediately
+                        resolve();
+                    };
+                    offscreenAsset.src = objectUrl;
+                });
 
-                ctx.fillStyle = '#000000';
-                ctx.font = 'bold 14px sans-serif';
-                ctx.fillText(`${prediction.class} (${Math.round(prediction.score * 100)}%)`, x + 5, y - 6);
-            });
-        };
+                // Clear the canvas layout and draw the video frame background first
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.drawImage(offscreenAsset, 0, 0, canvas.width, canvas.height);
 
-        // 4. Background Asynchronous AI Loop
-        async function runAI() {
-            if (aiModel && streamView.src) {
-                try {
-                    // Calculate predictions asynchronously in the background
-                    currentPredictions = await aiModel.detect(canvas);
-                } catch (err) {
-                    console.error("AI error:", err);
+                // Run the AI model directly on the frame data
+                if (aiModel) {
+                    try {
+                        const predictions = await aiModel.detect(canvas);
+                        
+                        // Draw bounding boxes synchronously on top of the exact frame it analyzed
+                        predictions.forEach(prediction => {
+                            const [x, y, width, height] = prediction.bbox;
+                            
+                            ctx.strokeStyle = '#00ff00';
+                            ctx.lineWidth = 3;
+                            ctx.strokeRect(x, y, width, height);
+
+                            ctx.fillStyle = '#00ff00';
+                            const textWidth = ctx.measureText(prediction.class).width;
+                            ctx.fillRect(x, y - 21, textWidth + 30, 21);
+
+                            ctx.fillStyle = '#000000';
+                            ctx.font = 'bold 14px sans-serif';
+                            ctx.fillText(`${prediction.class} (${Math.round(prediction.score * 100)}%)`, x + 5, y - 6);
+                        });
+                    } catch (aiError) {
+                        console.error("AI pipeline exception:", aiError);
+                    }
                 }
             }
-            // Request the next calculation frame immediately when ready, without blocking the UI
-            requestAnimationFrame(runAI);
+
+            // Continuously execute the rendering cycle as fast as the device allow
+            setTimeout(processAndRenderLoop, 10);
         }
     </script>
 </body>
