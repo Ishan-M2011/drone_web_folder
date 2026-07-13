@@ -4,19 +4,16 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Live Drone Mission Control</title>
-    <!-- Load TensorFlow.js and COCO-SSD Object Detection Model -->
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
-    <!-- Load Socket.io Client -->
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
     <style>
         body { background-color: #111; color: white; font-family: sans-serif; text-align: center; margin: 0; padding: 20px; }
-        h1 { margin-bottom: 5px; }
         #status { font-weight: bold; margin-bottom: 20px; }
         .connected { color: #00ff00; }
         .disconnected { color: #ff3333; }
-        .container { position: relative; width: 640px; height: 480px; margin: 0 auto; border: 2px solid #333; border-radius: 8px; overflow: hidden; }
-        #streamView { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; }
+        .container { position: relative; width: 480px; height: 360px; margin: 0 auto; border: 2px solid #333; border-radius: 8px; overflow: hidden; }
+        #streamView { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; display: none; }
         #canvasOverlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 10; }
         #loadingOverlay { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 18px; background: rgba(0,0,0,0.7); padding: 10px 20px; border-radius: 5px; }
     </style>
@@ -27,10 +24,8 @@
     <div id="status">Status: <span id="statusText" class="disconnected">Loading AI Model...</span></div>
 
     <div class="container">
-        <!-- Hidden image element to parse incoming Base64 frames -->
-        <img id="streamView" src="" alt="Live feed hidden" style="display:none;">
-        <!-- Canvas where we copy the frame and draw the AI bounding boxes -->
-        <canvas id="canvasOverlay" width="640" height="480"></canvas>
+        <img id="streamView" src="" alt="Live feed">
+        <canvas id="canvasOverlay" width="480" height="360"></canvas>
         <div id="loadingOverlay">Initializing Object Detection AI...</div>
     </div>
 
@@ -43,17 +38,17 @@
         const loadingOverlay = document.getElementById('loadingOverlay');
         
         let aiModel = null;
-        let isProcessing = false;
+        let currentPredictions = [];
 
-        // 1. Load the AI Model locally in the browser window
+        // 1. Load AI Model
         cocoSsd.load().then(model => {
             aiModel = model;
             loadingOverlay.style.display = 'none';
             statusText.textContent = 'Waiting for Pi...';
-            console.log("AI Model Loaded successfully inside the browser!");
+            // Start the background AI processing loop
+            runAI();
         });
 
-        // 2. Listen for network connection
         socket.on('connect', () => {
             if (aiModel) statusText.textContent = 'Connected to Server';
             statusText.className = 'connected';
@@ -64,51 +59,51 @@
             statusText.className = 'disconnected';
         });
 
-        // 3. Handle incoming frames from the Raspberry Pi
+        // 2. Handle incoming binary frames (Instantly renders, zero blocking)
         socket.on('response_back', function(data) {
-            // Update the hidden source image
-            streamView.src = 'data:image/jpeg;base64,' + data.image;
+            const blob = new Blob([data.image], { type: 'image/jpeg' });
+            // Clean up old object URLs to prevent browser memory leaks
+            if (streamView.src) {
+                URL.revokeObjectURL(streamView.src);
+            }
+            streamView.src = URL.createObjectURL(blob);
         });
 
-        // 4. Draw the loop and run detections sequentially
-        streamView.onload = async function() {
-            // Draw the current camera frame onto our visible canvas canvas
+        // 3. Fast Video Render Loop (Runs at 60 FPS)
+        streamView.onload = function() {
+            // Draw the camera image onto the canvas instantly
             ctx.drawImage(streamView, 0, 0, canvas.width, canvas.height);
 
-            // If the model isn't ready or is busy calculating the last frame, skip AI drawing for this frame
-            if (!aiModel || isProcessing) return;
-
-            isProcessing = true;
-
-            // Run object detection directly on the canvas image data
-            const predictions = await aiModel.detect(canvas);
-
-            // Draw bounding boxes for every detected item
-            predictions.forEach(prediction => {
+            // Draw whatever the latest AI predictions are without waiting for new calculations
+            currentPredictions.forEach(prediction => {
                 const [x, y, width, height] = prediction.bbox;
-                
-                // Draw bounding box rectangle
                 ctx.strokeStyle = '#00ff00';
                 ctx.lineWidth = 3;
                 ctx.strokeRect(x, y, width, height);
 
-                // Draw label background card
                 ctx.fillStyle = '#00ff00';
                 const textWidth = ctx.measureText(prediction.class).width;
                 ctx.fillRect(x, y - 21, textWidth + 30, 21);
 
-                // Draw text label name and confidence score
                 ctx.fillStyle = '#000000';
                 ctx.font = 'bold 14px sans-serif';
-                ctx.fillText(
-                    `${prediction.class} (${Math.round(prediction.score * 100)}%)`, 
-                    x + 5, 
-                    y - 6
-                );
+                ctx.fillText(`${prediction.class} (${Math.round(prediction.score * 100)}%)`, x + 5, y - 6);
             });
-
-            isProcessing = false;
         };
+
+        // 4. Background Asynchronous AI Loop
+        async function runAI() {
+            if (aiModel && streamView.src) {
+                try {
+                    // Calculate predictions asynchronously in the background
+                    currentPredictions = await aiModel.detect(canvas);
+                } catch (err) {
+                    console.error("AI error:", err);
+                }
+            }
+            // Request the next calculation frame immediately when ready, without blocking the UI
+            requestAnimationFrame(runAI);
+        }
     </script>
 </body>
 </html>
