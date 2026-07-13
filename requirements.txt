@@ -1,6 +1,9 @@
-flask==3.0.2
+gunicorn
+flask==3.0.3
 flask-socketio==5.3.6
-python-socketio==5.11.1
-gevent==24.2.1
+python-socketio==5.11.0
+opencv-python-headless==4.9.0.80
+ultralytics==8.2.2
+numpy==1.26.4
+gevent==23.9.1
 gevent-websocket==0.10.1
-gunicorn==21.2.0

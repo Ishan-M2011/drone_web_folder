@@ -4,28 +4,27 @@ import base64
 import numpy as np
 from ultralytics import YOLO
 
-# Connect to your Render server
 sio = socketio.Client()
+# REPLACE with your actual Render URL
 sio.connect("https://drone-stream-server.onrender.com")
 
-# Load the AI model
 model = YOLO("yolov8n.pt")
 
-@sio.on('video_frame') # The event the Pi is sending to
+@sio.on('video_frame')
 def on_frame(data):
-    # 1. Decode the raw frame from the drone
+    # Decode raw frame from Pi
     nparr = np.frombuffer(base64.b64decode(data['image']), np.uint8)
     frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-    # 2. Run AI and get the crisp boxes
+    # Run AI
     results = model(frame)
     annotated_frame = results[0].plot()
 
-    # 3. Show it on your laptop screen (the "perfect window" you wanted)
+    # Show the perfect window
     cv2.imshow("Remote AI Mission Control", annotated_frame)
     cv2.waitKey(1)
 
-    # 4. Send the finished frame back to the website
+    # Push processed frame to web
     _, buffer = cv2.imencode('.jpg', annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
     b64_frame = base64.b64encode(buffer).decode('utf-8')
     sio.emit('processed_feed', {'image': b64_frame})
