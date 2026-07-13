@@ -3,61 +3,112 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Live Drone AI Stream</title>
+    <title>Live Drone Mission Control</title>
+    <!-- Load TensorFlow.js and COCO-SSD Object Detection Model -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+    <!-- Load Socket.io Client -->
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
     <style>
-        body {
-            background-color: #121212;
-            color: white;
-            font-family: Arial, sans-serif;
-            text-align: center;
-            margin-top: 50px;
-        }
-        #stream-box {
-            margin: 20px auto;
-            width: 640px;
-            height: 480px;
-            background-color: #000;
-            border: 3px solid #333;
-            border-radius: 8px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        img {
-            width: 100%;
-            height: 100%;
-            border-radius: 5px;
-        }
+        body { background-color: #111; color: white; font-family: sans-serif; text-align: center; margin: 0; padding: 20px; }
+        h1 { margin-bottom: 5px; }
+        #status { font-weight: bold; margin-bottom: 20px; }
+        .connected { color: #00ff00; }
+        .disconnected { color: #ff3333; }
+        .container { position: relative; width: 640px; height: 480px; margin: 0 auto; border: 2px solid #333; border-radius: 8px; overflow: hidden; }
+        #streamView { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; }
+        #canvasOverlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 10; }
+        #loadingOverlay { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 18px; background: rgba(0,0,0,0.7); padding: 10px 20px; border-radius: 5px; }
     </style>
 </head>
 <body>
+
     <h1>Live Drone Mission Control</h1>
-    <p>Status: <span id="status" style="color: red;">Disconnected</span></p>
-    
-    <div id="stream-box">
-        <img id="live-feed" src="" alt="Waiting for Pi to broadcast..." />
+    <div id="status">Status: <span id="statusText" class="disconnected">Loading AI Model...</span></div>
+
+    <div class="container">
+        <!-- Hidden image element to parse incoming Base64 frames -->
+        <img id="streamView" src="" alt="Live feed hidden" style="display:none;">
+        <!-- Canvas where we copy the frame and draw the AI bounding boxes -->
+        <canvas id="canvasOverlay" width="640" height="480"></canvas>
+        <div id="loadingOverlay">Initializing Object Detection AI...</div>
     </div>
 
     <script>
         const socket = io();
-        const statusEl = document.getElementById('status');
-        const imgEl = document.getElementById('live-feed');
+        const statusText = document.getElementById('statusText');
+        const streamView = document.getElementById('streamView');
+        const canvas = document.getElementById('canvasOverlay');
+        const ctx = canvas.getContext('2d');
+        const loadingOverlay = document.getElementById('loadingOverlay');
+        
+        let aiModel = null;
+        let isProcessing = false;
 
+        // 1. Load the AI Model locally in the browser window
+        cocoSsd.load().then(model => {
+            aiModel = model;
+            loadingOverlay.style.display = 'none';
+            statusText.textContent = 'Waiting for Pi...';
+            console.log("AI Model Loaded successfully inside the browser!");
+        });
+
+        // 2. Listen for network connection
         socket.on('connect', () => {
-            statusEl.textContent = "Connected to Server";
-            statusEl.style.color = "green";
+            if (aiModel) statusText.textContent = 'Connected to Server';
+            statusText.className = 'connected';
         });
 
         socket.on('disconnect', () => {
-            statusEl.textContent = "Disconnected";
-            statusEl.style.color = "red";
+            statusText.textContent = 'Disconnected';
+            statusText.className = 'disconnected';
         });
 
-        // Listen for raw frame data broadcasted by the server
-        socket.on('stream_display', (data) => {
-            imgEl.src = "data:image/jpeg;base64," + data.image;
+        // 3. Handle incoming frames from the Raspberry Pi
+        socket.on('response_back', function(data) {
+            // Update the hidden source image
+            streamView.src = 'data:image/jpeg;base64,' + data.image;
         });
+
+        // 4. Draw the loop and run detections sequentially
+        streamView.onload = async function() {
+            // Draw the current camera frame onto our visible canvas canvas
+            ctx.drawImage(streamView, 0, 0, canvas.width, canvas.height);
+
+            // If the model isn't ready or is busy calculating the last frame, skip AI drawing for this frame
+            if (!aiModel || isProcessing) return;
+
+            isProcessing = true;
+
+            // Run object detection directly on the canvas image data
+            const predictions = await aiModel.detect(canvas);
+
+            // Draw bounding boxes for every detected item
+            predictions.forEach(prediction => {
+                const [x, y, width, height] = prediction.bbox;
+                
+                // Draw bounding box rectangle
+                ctx.strokeStyle = '#00ff00';
+                ctx.lineWidth = 3;
+                ctx.strokeRect(x, y, width, height);
+
+                // Draw label background card
+                ctx.fillStyle = '#00ff00';
+                const textWidth = ctx.measureText(prediction.class).width;
+                ctx.fillRect(x, y - 21, textWidth + 30, 21);
+
+                // Draw text label name and confidence score
+                ctx.fillStyle = '#000000';
+                ctx.font = 'bold 14px sans-serif';
+                ctx.fillText(
+                    `${prediction.class} (${Math.round(prediction.score * 100)}%)`, 
+                    x + 5, 
+                    y - 6
+                );
+            });
+
+            isProcessing = false;
+        };
     </script>
 </body>
 </html>

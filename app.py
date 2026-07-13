@@ -14,8 +14,8 @@ def index():
 
 @socketio.on('video_frame')
 def handle_video_frame(data):
-    # Relays the frame data received from the Pi out to all browser clients
-    emit('stream_display', data, broadcast=True)
+    # Simply forward the base64 string directly out to all web clients
+    emit('response_back', {'image': data['image']}, broadcast=True)
 
 if __name__ == '__main__':
     # Cloud hosts specify a dynamic PORT variable we must listen to
